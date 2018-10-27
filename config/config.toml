@@ -13,3 +13,9 @@ secret = "" #API_SECRET
 [log]
 path = "."
 filename = "marketdata.log"
+
+# Market Data Publishing
+[zmq]
+publisher_ip=""
+publisher_port=""
+
