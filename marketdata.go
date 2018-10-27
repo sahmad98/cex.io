@@ -6,6 +6,7 @@ import (
 	"github.com/buger/goterm"
 	"log"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -15,30 +16,17 @@ type Level struct {
 }
 
 const (
-	kMaxDepth = 6
-	kMaxPrice = 9999999.9999
-	kBuy      = 0
-	kSell     = 1
-	kNumSide  = 2
+	kMaxDepth         = 6
+	kMaxPrice float32 = 9999999.9999
+	kBuy              = 0
+	kSell             = 1
+	kNumSide          = 2
 )
-
-type Levels struct {
-	Data [kMaxDepth]Level
-}
 
 type Side int
 
-type Orderbook struct {
-	Id        int
-	Pair      string
-	Bids      Levels
-	Asks      Levels
-	Low       float64
-	High      float64
-	LastPrice float64
-	Volume    float64
-	Bid       float32
-	Ask       float32
+type Levels struct {
+	Data [kMaxDepth]Level
 }
 
 func (levels *Levels) Len() int { return len(levels.Data) }
@@ -51,7 +39,20 @@ func (levels *Levels) Less(i, j int) bool {
 	return levels.Data[i].Price < levels.Data[j].Price
 }
 
-func (orderbook *Orderbook) Update(price, qty float32, level int, side Side) {
+type Orderbook struct {
+	Id        int
+	Pair      string
+	Bids      Levels
+	Asks      Levels
+	Low       float32
+	High      float32
+	LastPrice float32
+	Volume    float32
+	Bid       float32
+	Ask       float32
+}
+
+func (orderbook *Orderbook) update(price, qty float32, level int, side Side) {
 	if side == kBuy {
 		orderbook.Bids.Data[level].Price = price
 		orderbook.Bids.Data[level].Qty = qty
@@ -61,11 +62,53 @@ func (orderbook *Orderbook) Update(price, qty float32, level int, side Side) {
 	}
 }
 
-// var orderbook = Orderbook{}
+func (orderbook *Orderbook) initalize() {
+	for i := 0; i < kMaxDepth; i++ {
+		orderbook.update(-kMaxPrice, 0, i, kBuy)
+		orderbook.update(kMaxPrice, 0, i, kSell)
+	}
+}
+
+func (orderbook *Orderbook) allLevelUpdate(levels [][]float32, side Side) {
+	for index, data := range levels {
+		orderbook.update(data[0], data[1], index, side)
+	}
+}
+
+func (orderbook *Orderbook) removeLevel(price float32, side Side) {
+	price_levels := orderbook.Bids.Data
+	max_price := -kMaxPrice
+	if side == kSell {
+		price_levels = orderbook.Asks.Data
+		max_price = kMaxPrice
+	}
+
+	for i, level := range price_levels {
+		if level.Price == price {
+			orderbook.update(max_price, 0, i, side)
+		}
+	}
+}
+
+func (orderbook *Orderbook) updateLevel(price, qty float32, side Side) bool {
+	price_levels := orderbook.Bids.Data
+	if side == kSell {
+		price_levels = orderbook.Asks.Data
+	}
+
+	for i, level := range price_levels {
+		if level.Price == price {
+			orderbook.update(price, qty, i, side)
+			return true
+		}
+	}
+
+	return false
+}
+
 var ob_map = make(map[string]*Orderbook)
 
 func PrintOrderbook() {
-	// orderbook := ob_map[m.Data.Pair]
 	goterm.Clear()
 	goterm.MoveCursor(1, 1)
 	for _, orderbook := range ob_map {
@@ -84,52 +127,45 @@ func PrintOrderbook() {
 }
 
 func CreateSnapshot(m *Message) {
-	orderbook := ob_map[m.Data.Pair.(string)]
+	orderbook := &Orderbook{}
 	orderbook.Pair = m.Data.Pair.(string)
-	for i := 0; i < kMaxDepth; i++ {
-		orderbook.Update(-kMaxPrice, 0, i, kBuy)
-		orderbook.Update(kMaxPrice, 0, i, kSell)
-	}
-
-	for index, data := range m.Data.Bids {
-		orderbook.Update(data[0], data[1], index, kBuy)
-	}
-
-	for index, data := range m.Data.Asks {
-		orderbook.Update(data[0], data[1], index, kSell)
-	}
 	orderbook.Id = m.Data.Id
+	orderbook.initalize()
+	orderbook.allLevelUpdate(m.Data.Bids, kBuy)
+	orderbook.allLevelUpdate(m.Data.Asks, kSell)
+	ob_map[m.Data.Pair.(string)] = orderbook
 	l.Infof("Created Orderbook %+v", orderbook)
+}
+
+func ParseFloat32(data string) float32 {
+	num, _ := strconv.ParseFloat(data, 32)
+	return float32(num)
+}
+
+func UpdateTicker(m *Message) {
+	if orderbook, ok := ob_map[m.Data.Pair.(string)]; ok {
+		orderbook.Low = ParseFloat32(m.Data.Low)
+		orderbook.High = ParseFloat32(m.Data.High)
+		orderbook.LastPrice = ParseFloat32(m.Data.Last)
+		orderbook.Volume = ParseFloat32(m.Data.Volume)
+		orderbook.Bid = m.Data.Bid
+		orderbook.Ask = m.Data.Ask
+	}
 }
 
 func UpdateSnapshot(m *Message) {
 	orderbook := ob_map[m.Data.Pair.(string)]
 	updated_bid := false
 	updated_ask := false
-
 	orderbook.Id++
 	for _, update := range m.Data.Bids {
 		l.Infof("Bid Update %+v", update)
 		if update[1] == 0 {
-			for i, bid := range orderbook.Bids.Data {
-				if bid.Price == update[0] {
-					// bids.Update(-kMaxPrice, 0, i)
-					orderbook.Update(-kMaxPrice, 0, i, kBuy)
-				}
-			}
+			orderbook.removeLevel(update[0], kBuy)
 		} else {
-			for i, bid := range orderbook.Bids.Data {
-				if bid.Price == update[0] {
-					// bids.Update(update[0], update[1], i)
-					orderbook.Update(update[0], update[1], i, kBuy)
-					updated_bid = true
-					break
-				}
-			}
-
+			updated_bid = orderbook.updateLevel(update[0], update[1], kBuy)
 			if !updated_bid {
-				// bids.Update(update[0], update[1], kMaxDepth-1)
-				orderbook.Update(update[0], update[1], kMaxDepth-1, kBuy)
+				orderbook.update(update[0], update[1], kMaxDepth-1, kBuy)
 			}
 		}
 	}
@@ -137,25 +173,11 @@ func UpdateSnapshot(m *Message) {
 	for _, update := range m.Data.Asks {
 		l.Infof("Ask Update %+v", update)
 		if update[1] == 0 {
-			for i, ask := range orderbook.Asks.Data {
-				if ask.Price == update[0] {
-					orderbook.Update(kMaxPrice, 0, i, kSell)
-					// asks.Update(kMaxPrice, 0, i)
-				}
-			}
+			orderbook.removeLevel(update[0], kSell)
 		} else {
-			for i, ask := range orderbook.Asks.Data {
-				if ask.Price == update[0] {
-					// asks.Update(update[0], update[1], i)
-					orderbook.Update(update[0], update[1], i, kSell)
-					updated_ask = true
-					break
-				}
-			}
-
+			updated_ask = orderbook.updateLevel(update[0], update[1], kSell)
 			if !updated_ask {
-				// asks.Update(update[0], update[1], kMaxDepth-1)
-				orderbook.Update(update[0], update[1], kMaxDepth-1, kSell)
+				orderbook.update(update[0], update[1], kMaxDepth-1, kSell)
 			}
 
 		}
@@ -186,77 +208,79 @@ func ResponseHandler(m Message) {
 	}
 }
 
+func (md *MarketDataAdapter) pingPongRoutine() {
+	for ping := range md.PingChannel {
+		ping.Type = "pong"
+		md.Context.SendChannel <- ping
+		l.Infof("PONG")
+	}
+}
+
+func getTickerSymbol(message *Message) string {
+	return message.Data.Pair.([]interface{})[0].(string) + ":" + message.Data.Pair.([]interface{})[1].(string)
+}
+
+func (md *MarketDataAdapter) responseRouterRoutine() {
+	for message := range md.Context.RecvChannel {
+		if message.Type == "ping" {
+			l.Infof("PING")
+			md.PingChannel <- message
+		} else if message.Type == "md_update" {
+			l.Infof("MD_UPDTE")
+			md.UpdateChannel <- message
+		} else if message.Type == "ticker" {
+			l.Infof("TICKER")
+			message.Data.Pair = getTickerSymbol(&message)
+			l.Infof("TICKER %s", message.Data.Pair)
+			md.UpdateChannel <- message
+		} else {
+			md.ResponseChannel <- message
+		}
+	}
+}
+
+func (md *MarketDataAdapter) responseHandlerRoutine() {
+	for response := range md.ResponseChannel {
+		if response.Type == "order-book-subscribe" {
+			l.Infof("MD: %+v", response)
+			CreateSnapshot(&response)
+			PrintOrderbook()
+			l.Infof("%+v", ob_map)
+		}
+		md.ResponseHandler(response)
+	}
+}
+
+func (md *MarketDataAdapter) updateHandlerRoutine() {
+	for response := range md.UpdateChannel {
+		// log.Printf("UpdateChannel: %+v", response)
+		orderbook := ob_map[response.Data.Pair.(string)]
+		if response.Type == "md_update" && orderbook.Id+1 == response.Data.Id {
+			UpdateSnapshot(&response)
+			l.Infof("Current Orderbook: %+v", orderbook)
+		} else if response.Type == "ticker" {
+			UpdateTicker(&response)
+		} else {
+			log.Fatal("Missed update snapshot/Resync")
+		}
+	}
+}
+
 func NewMarketDataAdapter(context *Context) *MarketDataAdapter {
 	md := MarketDataAdapter{}
+	md.Context = context
 	md.PingChannel = make(chan Message, 16)
 	md.ResponseChannel = make(chan Message, 16)
 	md.UpdateChannel = make(chan Message, 16)
-	md.Context = context
-
 	md.UpdateHandler = func(m Message) {}
 	md.ResponseHandler = ResponseHandler
 
 	// Start Response handler goroutine which will
 	// send responses on different channels
-	go func(context *Context, md *MarketDataAdapter) {
-		for message := range context.RecvChannel {
-			if message.Type == "ping" {
-				l.Infof("PING")
-				md.PingChannel <- message
-			} else if message.Type == "md_update" {
-				l.Infof("MD_UPDTE")
-				md.UpdateChannel <- message
-			} else if message.Type == "ticker" {
-				l.Infof("TICKER")
-				message.Data.Pair = message.Data.Pair.([]interface{})[0].(string) + ":" + message.Data.Pair.([]interface{})[1].(string)
-				l.Infof("TICKER %s", message.Data.Pair)
-				md.UpdateChannel <- message
-			} else {
-				md.ResponseChannel <- message
-			}
-		}
-	}(context, &md)
-
-	go func(context *Context, md *MarketDataAdapter) {
-		for ping := range md.PingChannel {
-			ping.Type = "pong"
-			md.Context.SendChannel <- ping
-			l.Infof("PONG")
-		}
-	}(context, &md)
-
-	go func(context *Context, md *MarketDataAdapter) {
-		for response := range md.ResponseChannel {
-			// log.Printf("ResponseChannel: %+v", response)
-			if response.Type == "order-book-subscribe" {
-				l.Infof("MD: %+v", response)
-				_, ok := ob_map[response.Data.Pair.(string)]
-				if !ok {
-					ob_map[response.Data.Pair.(string)] = &Orderbook{}
-				}
-				CreateSnapshot(&response)
-				PrintOrderbook()
-				l.Infof("%+v", ob_map)
-			}
-			md.ResponseHandler(response)
-		}
-	}(context, &md)
-
-	go func(context *Context, md *MarketDataAdapter) {
-		for response := range md.UpdateChannel {
-			// log.Printf("UpdateChannel: %+v", response)
-			orderbook := ob_map[response.Data.Pair.(string)]
-			if response.Type == "md_update" && orderbook.Id+1 == response.Data.Id {
-				UpdateSnapshot(&response)
-				l.Infof("Current Orderbook: %+v", orderbook)
-			} else if response.Type == "ticker" {
-				l.Infof("Ticker: %+v", response)
-			} else {
-				log.Fatal("Missed update snapshot/Resync")
-			}
-		}
-	}(context, &md)
-
+	go md.pingPongRoutine()
+	go md.responseRouterRoutine()
+	go md.responseHandlerRoutine()
+	go md.updateHandlerRoutine()
 	return &md
 }
 
