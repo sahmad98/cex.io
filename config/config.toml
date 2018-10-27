@@ -1,0 +1,15 @@
+# Config for Application
+
+# API Endpoints
+[websocket]
+endpoint = "wss://ws.cex.io/ws" #Endpoint
+
+# Authorization Config for cex.io
+[auth]
+key    = "" # API_KEY
+secret = "" #API_SECRET
+
+# Logging Related Config
+[log]
+path = "."
+filename = "marketdata.log"
