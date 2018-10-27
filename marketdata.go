@@ -2,11 +2,11 @@ package cexio
 
 import (
 	"encoding/json"
+	"fmt"
+	"github.com/buger/goterm"
 	"log"
 	"sort"
 	"time"
-	"github.com/buger/goterm"
-	"fmt"
 )
 
 type Level struct {
@@ -67,12 +67,12 @@ var ob_map = make(map[string]*Orderbook)
 func PrintOrderbook() {
 	// orderbook := ob_map[m.Data.Pair]
 	goterm.Clear()
-	goterm.MoveCursor(1,1)
+	goterm.MoveCursor(1, 1)
 	for _, orderbook := range ob_map {
-		ob  := goterm.NewTable(0, 10, 5, ' ', 0)
+		ob := goterm.NewTable(0, 10, 5, ' ', 0)
 		fmt.Fprintf(ob, "%s\t%d\n", orderbook.Pair, orderbook.Id)
 		fmt.Fprintf(ob, "%s\t%s\t%s\t%s\n", "BidSz", "Bid", "Ask", "AskSz")
-		for i:=0; i<kMaxDepth-1; i++ {
+		for i := 0; i < kMaxDepth-1; i++ {
 			fmt.Fprintf(ob, "%0.4f\t%0.4f\t", orderbook.Bids.Data[i].Qty, orderbook.Bids.Data[i].Price)
 			fmt.Fprintf(ob, "%0.4f\t%0.4f\n", orderbook.Asks.Data[i].Price, orderbook.Asks.Data[i].Qty)
 		}

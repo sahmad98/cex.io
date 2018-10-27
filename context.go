@@ -1,3 +1,6 @@
+// Go package to interact with CEX.IO crypto currency trading.
+// Apis provided can be used to create a algorithmics crypto
+// currency trading platform.
 package cexio
 
 import (
@@ -14,7 +17,6 @@ import (
 	"time"
 )
 
-// TODO Read from Config file
 var WS_ENDPOINT = "wss://ws.cex.io/ws"
 var API_KEY = ""
 var API_SECRET = ""
@@ -22,8 +24,10 @@ var LOG_PATH = "."
 var LOG_FILE = "marketdata.log"
 var l *logger.Logger = nil
 
+// Request/Response structure used to parse outgoing/incoming json
+// string into a golang structure.
 type Message struct {
-	Type string `json:"e"`
+	Type string `json:"e"` // Field to specify the type of message
 	Auth struct {
 		Key       string `json:"key"`
 		Signature string `json:"signature"`
