@@ -293,18 +293,3 @@ func (adapter *MarketDataAdapter) Cleanup() {
 	close(adapter.UpdateChannel)
 	l.Infof("MarketDataAdapater Cleaup")
 }
-
-func CalculateTriangularArb() {
-	for {
-		btcusd, ok_bu := ob_map["BTC:USD"]
-		ethusd, ok_eu := ob_map["ETH:USD"]
-		ethbtc, ok_eb := ob_map["ETH:BTC"]
-
-		if ok_bu && ok_eu && ok_eb {
-			l.Infof("Buy Hit Spread: %f\n", btcusd.Bids.Data[0].Price * ethbtc.Bids.Data[0].Price - ethusd.Asks.Data[0].Price)
-			l.Infof("Sell Hit Spread: %f\n", ethusd.Bids.Data[0].Price - btcusd.Asks.Data[0].Price * ethbtc.Asks.Data[0].Price)
-		}
-
-		for i:=0;i<10000;i++{}
-	}
-}
