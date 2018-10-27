@@ -5,11 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/google/logger"
 	"github.com/gorilla/websocket"
-	"log"
-	"strconv"
-	// "sync"
 	"github.com/spf13/viper"
+	"log"
+	"os"
+	"strconv"
 	"time"
 )
 
@@ -17,6 +18,9 @@ import (
 var WS_ENDPOINT = "wss://ws.cex.io/ws"
 var API_KEY = ""
 var API_SECRET = ""
+var LOG_PATH = "."
+var LOG_FILE = "marketdata.log"
+var l *logger.Logger = nil
 
 type Message struct {
 	Type string `json:"e"`
@@ -50,10 +54,10 @@ type Context struct {
 	RecvChannel     chan Message
 	SendChannel     chan Message
 	SendJsonChannel chan []byte
-	// Mux             sync.Mutex
+	Logger          *logger.Logger
 }
 
-func ReadConfig() {
+func readConfig() {
 	viper.SetConfigName("config")
 	viper.AddConfigPath("./config")
 	viper.SetConfigType("toml")
@@ -64,62 +68,104 @@ func ReadConfig() {
 
 	API_KEY = viper.GetString("auth.key")
 	API_SECRET = viper.GetString("auth.secret")
+	if viper.IsSet("log.path") {
+		LOG_PATH = viper.GetString("log.path")
+	}
+	if viper.IsSet("log.filename") {
+		LOG_FILE = viper.GetString("log.filename")
+	}
+	if viper.IsSet("websocket.endpoing") {
+		WS_ENDPOINT = viper.GetString("websocket.endpoint")
+	}
 }
 
-func GetApplicationContext() (*Context, error) {
-	ReadConfig()
+func initLogger() {
+	file_handle, err := os.Create(LOG_PATH + "/" + LOG_FILE)
+	if err != nil {
+		log.Printf("Error creating logfile: ", LOG_FILE)
+		panic(err)
+	}
+	l = logger.Init("", false, false, file_handle)
+}
+
+func initChannels(context *Context, q_size int) {
+	context.RecvChannel = make(chan Message, q_size)
+	context.SendChannel = make(chan Message, q_size)
+	context.SendJsonChannel = make(chan []byte, q_size)
+}
+
+func initConnection(context *Context) {
 	connection, _, error := websocket.DefaultDialer.Dial(WS_ENDPOINT, nil)
 	if error != nil {
-		log.Fatal("Error opening websocket connection: %s", error)
-		return nil, error
+		l.Fatalf("Error opening websocket connection: %s", error)
+		panic(error)
 	}
-	context := Context{}
 	context.Connection = connection
-	context.RecvChannel = make(chan Message, 16)
-	context.SendChannel = make(chan Message, 16)
-	context.SendJsonChannel = make(chan []byte, 16)
-	go func(context *Context) {
-		for {
-			_, message, error := context.Connection.ReadMessage()
-			log.Printf("RECV: %s", message)
-			if error != nil {
-				log.Fatal("Error reciveing messages: ", error)
-				break
-			}
-			response := Message{}
-			error = json.Unmarshal(message, &response)
-			if error != nil {
-				log.Fatal("Unable to parse response: %s", error)
-				break
-			} else {
-				context.RecvChannel <- response
-			}
-		}
-	}(&context)
+}
 
-	go func(context *Context) {
-		for request := range context.SendChannel {
-			json_string, error := json.Marshal(request)
-			if error != nil {
-				log.Fatal("Unable to convert to json payload: ", error)
-				break
-			}
-			context.SendJsonChannel <- json_string
+func runWebsocketReader(context *Context) {
+	for {
+		_, message, error := context.Connection.ReadMessage()
+		l.Infof("RECV: %s", message)
+		if error != nil {
+			l.Errorf("Error reciveing messages: %s", error)
 		}
-	}(&context)
+		response := Message{}
+		error = json.Unmarshal(message, &response)
+		if error != nil {
+			l.Errorf("Unable to parse response: %s", error)
+		} else {
+			context.RecvChannel <- response
+		}
+	}
+}
 
-	go func(context *Context) {
-		for request := range context.SendJsonChannel {
-			log.Printf("Writing")
-			error = context.Connection.WriteMessage(websocket.TextMessage, request)
-			log.Printf("Written")
-			if error != nil {
-				log.Fatal("Unable to send message: %s", error)
-				break
-			}
+func runWebsocketSender(context *Context) {
+	for request := range context.SendChannel {
+		json_string, error := json.Marshal(request)
+		if error != nil {
+			l.Errorf("Unable to convert to json payload: %s", error)
 		}
-	}(&context)
-	return &context, nil
+		context.SendJsonChannel <- json_string
+	}
+}
+
+func runWebsocketJsonSender(context *Context) {
+	for request := range context.SendJsonChannel {
+		l.Infof("SEND: %s", request)
+		error := context.Connection.WriteMessage(websocket.TextMessage, request)
+		if error != nil {
+			l.Error("Unable to send message: %s", error)
+		}
+	}
+}
+
+func runGoRoutines(context *Context) {
+	go runWebsocketJsonSender(context)
+	go runWebsocketSender(context)
+	go runWebsocketReader(context)
+}
+
+func GetApplicationContext() *Context {
+	initLogger()
+	readConfig()
+	// connection, _, error := websocket.DefaultDialer.Dial(WS_ENDPOINT, nil)
+	// if error != nil {
+	// 	l.Fatalf("Error opening websocket connection: %s", error)
+	// 	panic(error)
+	// }
+	context := &Context{}
+	initConnection(context)
+	initChannels(context, 16)
+	runGoRoutines(context)
+	return context
+}
+
+func GenerateSignature(time int64) string {
+	key := strconv.FormatInt(time, 10) + API_KEY
+	mac := hmac.New(sha256.New, []byte(API_SECRET))
+	mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func (context *Context) Authenticate() error {
@@ -127,12 +173,8 @@ func (context *Context) Authenticate() error {
 	payload.Type = "auth"
 	payload.Auth.Key = API_KEY
 	payload.Auth.Timestamp = time.Now().Unix()
-	key := strconv.FormatInt(payload.Auth.Timestamp, 10) + payload.Auth.Key
-	log.Printf("Key: %s", key)
-	mac := hmac.New(sha256.New, []byte(API_SECRET))
-	mac.Write([]byte(key))
-	payload.Auth.Signature = hex.EncodeToString(mac.Sum(nil))
-	log.Printf("Signature: %s", payload.Auth.Signature)
+	payload.Auth.Signature = GenerateSignature(payload.Auth.Timestamp)
+	l.Infof("Signature: %s", payload.Auth.Signature)
 	context.SendChannel <- payload
 	return nil
 }
@@ -141,5 +183,6 @@ func (context *Context) Cleanup() {
 	context.Connection.Close()
 	close(context.RecvChannel)
 	close(context.SendChannel)
-	log.Printf("Context Cleanup")
+	l.Infof("Context Cleanup")
+	l.Close()
 }
