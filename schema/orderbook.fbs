@@ -1,0 +1,25 @@
+namespace types;
+
+struct Level {
+    Price:float;
+    Qty:float;
+}
+
+table Levels {
+    Data:[Level];
+}
+
+table Orderbook {
+    Id:int;
+    Pair:string;
+    Bids:Levels;
+    Asks:Levels;
+    Low:float;
+    High:float;
+    LastPrice:float;
+    Volume:float;
+    Bid:float;
+    Ask:float;
+}
+
+root_type Orderbook;
