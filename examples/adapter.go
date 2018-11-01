@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"github.com/sahmad98/cex.io"
+	"log"
 	"time"
 )
 

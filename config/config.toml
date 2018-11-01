@@ -16,6 +16,11 @@ filename = "marketdata.log"
 
 # Market Data Publishing
 [zmq]
+enable = false
 publisher_ip=""
 publisher_port=""
 
+[udp]
+enable = true
+publish_ip="127.0.0.1"
+publish_port=10550
