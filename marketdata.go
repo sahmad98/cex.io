@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/buger/goterm"
+	"github.com/google/flatbuffers/go"
+	buffer "github.com/sahmad98/cex.io/types"
+	"github.com/spf13/viper"
 	"log"
+	"net"
 	"sort"
 	"strconv"
 	"time"
@@ -40,7 +44,7 @@ func (levels *Levels) Less(i, j int) bool {
 }
 
 type Orderbook struct {
-	Id        int
+	Id        int32
 	Pair      string
 	Bids      Levels
 	Asks      Levels
@@ -50,6 +54,46 @@ type Orderbook struct {
 	Volume    float32
 	Bid       float32
 	Ask       float32
+}
+
+func (ob *Orderbook) getBuffer() []byte {
+	builder := flatbuffers.NewBuilder(1024)
+
+	// buffer.LevelsStart(builder)
+	buffer.LevelsStartDataVector(builder, kMaxDepth)
+	for i := kMaxDepth - 1; i >= 0; i-- {
+		bid := buffer.CreateLevel(builder, ob.Bids.Data[i].Price, ob.Bids.Data[i].Qty)
+		builder.PrependUOffsetT(bid)
+	}
+	// bids := buffer.LevelsEnd(builder)
+	bids := builder.EndVector(kMaxDepth)
+
+	// buffer.LevelsStart(builder)
+	buffer.LevelsStartDataVector(builder, kMaxDepth)
+	for i := kMaxDepth - 1; i >= 0; i-- {
+		ask := buffer.CreateLevel(builder, ob.Asks.Data[i].Price, ob.Asks.Data[i].Qty)
+		builder.PrependUOffsetT(ask)
+	}
+	// asks := buffer.LevelsEnd(builder)
+	asks := builder.EndVector(kMaxDepth)
+	pair := builder.CreateString(ob.Pair)
+
+	buffer.OrderbookStart(builder)
+	buffer.OrderbookAddId(builder, ob.Id)
+	buffer.OrderbookAddPair(builder, pair)
+	buffer.OrderbookAddBids(builder, bids)
+	buffer.OrderbookAddAsks(builder, asks)
+	buffer.OrderbookAddLow(builder, ob.Low)
+	buffer.OrderbookAddHigh(builder, ob.High)
+	buffer.OrderbookAddLastPrice(builder, ob.LastPrice)
+	buffer.OrderbookAddVolume(builder, ob.Volume)
+	buffer.OrderbookAddBid(builder, ob.Bid)
+	buffer.OrderbookAddAsk(builder, ob.Ask)
+
+	orderbook := buffer.OrderbookEnd(builder)
+	builder.Finish(orderbook)
+	buf := builder.FinishedBytes()
+	return buf
 }
 
 func (orderbook *Orderbook) update(price, qty float32, level int, side Side) {
@@ -121,20 +165,22 @@ func PrintOrderbook() {
 		}
 		fmt.Fprintf(ob, "\n")
 		goterm.Println(ob)
+		goterm.Printf("%+v", orderbook.getBuffer())
 	}
 
 	goterm.Flush()
 }
 
-func CreateSnapshot(m *Message) {
+func (md *MarketDataAdapter) CreateSnapshot(m *Message) {
 	orderbook := &Orderbook{}
 	orderbook.Pair = m.Data.Pair.(string)
-	orderbook.Id = m.Data.Id
+	orderbook.Id = int32(m.Data.Id)
 	orderbook.initalize()
 	orderbook.allLevelUpdate(m.Data.Bids, kBuy)
 	orderbook.allLevelUpdate(m.Data.Asks, kSell)
 	ob_map[m.Data.Pair.(string)] = orderbook
 	l.Infof("Created Orderbook %+v", orderbook)
+	md.OrderbookChannel <- *orderbook
 }
 
 func ParseFloat32(data string) float32 {
@@ -142,7 +188,7 @@ func ParseFloat32(data string) float32 {
 	return float32(num)
 }
 
-func UpdateTicker(m *Message) {
+func (md *MarketDataAdapter) UpdateTicker(m *Message) {
 	if orderbook, ok := ob_map[m.Data.Pair.(string)]; ok {
 		orderbook.Low = ParseFloat32(m.Data.Low)
 		orderbook.High = ParseFloat32(m.Data.High)
@@ -150,10 +196,11 @@ func UpdateTicker(m *Message) {
 		orderbook.Volume = ParseFloat32(m.Data.Volume)
 		orderbook.Bid = m.Data.Bid
 		orderbook.Ask = m.Data.Ask
+		md.OrderbookChannel <- *orderbook
 	}
 }
 
-func UpdateSnapshot(m *Message) {
+func (md *MarketDataAdapter) UpdateSnapshot(m *Message) {
 	orderbook := ob_map[m.Data.Pair.(string)]
 	updated_bid := false
 	updated_ask := false
@@ -185,17 +232,19 @@ func UpdateSnapshot(m *Message) {
 
 	sort.Sort(sort.Reverse(&orderbook.Bids))
 	sort.Sort(&orderbook.Asks)
+	md.OrderbookChannel <- *orderbook
 }
 
 type HandlerFunc func(message Message)
 
 type MarketDataAdapter struct {
-	PingChannel     chan Message
-	ResponseChannel chan Message
-	UpdateChannel   chan Message
-	Context         *Context
-	UpdateHandler   HandlerFunc
-	ResponseHandler HandlerFunc
+	PingChannel      chan Message
+	ResponseChannel  chan Message
+	UpdateChannel    chan Message
+	OrderbookChannel chan Orderbook
+	Context          *Context
+	UpdateHandler    HandlerFunc
+	ResponseHandler  HandlerFunc
 }
 
 func ResponseHandler(m Message) {
@@ -243,8 +292,7 @@ func (md *MarketDataAdapter) responseHandlerRoutine() {
 	for response := range md.ResponseChannel {
 		if response.Type == "order-book-subscribe" {
 			l.Infof("MD: %+v", response)
-			CreateSnapshot(&response)
-			PrintOrderbook()
+			md.CreateSnapshot(&response)
 			l.Infof("%+v", ob_map)
 		}
 		md.ResponseHandler(response)
@@ -255,13 +303,33 @@ func (md *MarketDataAdapter) updateHandlerRoutine() {
 	for response := range md.UpdateChannel {
 		// log.Printf("UpdateChannel: %+v", response)
 		orderbook := ob_map[response.Data.Pair.(string)]
-		if response.Type == "md_update" && orderbook.Id+1 == response.Data.Id {
-			UpdateSnapshot(&response)
+		if response.Type == "md_update" && orderbook.Id+1 == int32(response.Data.Id) {
+			md.UpdateSnapshot(&response)
 			l.Infof("Current Orderbook: %+v", orderbook)
 		} else if response.Type == "ticker" {
-			UpdateTicker(&response)
+			md.UpdateTicker(&response)
 		} else {
 			log.Fatal("Missed update snapshot/Resync")
+		}
+	}
+}
+
+func (md *MarketDataAdapter) runOrderbookPublisher() {
+	is_publish_enabled := viper.GetBool("udp.enabled")
+	if is_publish_enabled {
+		ip := viper.GetString("udp.publish_ip")
+		port := viper.GetInt("udp.publish_port")
+		conn, error := net.ListenPacket("udp", ":0")
+		if error != nil {
+			log.Fatal("Error opening publish connection ", error)
+		}
+		dest, error := net.ResolveUDPAddr("udp", ip+":"+strconv.Itoa(port))
+		for orderbook := range md.OrderbookChannel {
+			_, err := conn.WriteTo(orderbook.getBuffer(), dest)
+			l.Infof("Relay Orderbook: %+v", orderbook)
+			if err != nil {
+				l.Infof("Error Relaying, %s", err)
+			}
 		}
 	}
 }
@@ -272,6 +340,7 @@ func NewMarketDataAdapter(context *Context) *MarketDataAdapter {
 	md.PingChannel = make(chan Message, 16)
 	md.ResponseChannel = make(chan Message, 16)
 	md.UpdateChannel = make(chan Message, 16)
+	md.OrderbookChannel = make(chan Orderbook, 16)
 	md.UpdateHandler = func(m Message) {}
 	md.ResponseHandler = ResponseHandler
 
@@ -281,6 +350,7 @@ func NewMarketDataAdapter(context *Context) *MarketDataAdapter {
 	go md.responseRouterRoutine()
 	go md.responseHandlerRoutine()
 	go md.updateHandlerRoutine()
+	go md.runOrderbookPublisher()
 	return &md
 }
 
