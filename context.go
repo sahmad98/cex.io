@@ -49,13 +49,15 @@ type Message struct {
 		Ask       float32     `json:"ask"`
 		Ok        string      `json:"ok"`
 		Error     string      `json:"error"`
+		Timestamp int64       `json:"time"`
 	} `json:"data"`
-	Timestamp int64 `json:"time"`
+	// Custom data for performace calculations
+	RecvTimestamp int64
 }
 
 type Context struct {
 	Connection      *websocket.Conn
-	RecvChannel     chan Message
+	RecvChannel     chan *Message
 	SendChannel     chan Message
 	SendJsonChannel chan []byte
 	Logger          *logger.Logger
@@ -93,7 +95,7 @@ func initLogger() {
 }
 
 func initChannels(context *Context, q_size int) {
-	context.RecvChannel = make(chan Message, q_size)
+	context.RecvChannel = make(chan *Message, q_size)
 	context.SendChannel = make(chan Message, q_size)
 	context.SendJsonChannel = make(chan []byte, q_size)
 }
@@ -116,10 +118,11 @@ func runWebsocketReader(context *Context) {
 		}
 		response := Message{}
 		error = json.Unmarshal(message, &response)
+		response.RecvTimestamp = time.Now().UnixNano()
 		if error != nil {
 			l.Errorf("Unable to parse response: %s", error)
 		} else {
-			context.RecvChannel <- response
+			context.RecvChannel <- &response
 		}
 	}
 }
@@ -153,11 +156,6 @@ func runGoRoutines(context *Context) {
 func GetApplicationContext() *Context {
 	initLogger()
 	readConfig()
-	// connection, _, error := websocket.DefaultDialer.Dial(WS_ENDPOINT, nil)
-	// if error != nil {
-	// 	l.Fatalf("Error opening websocket connection: %s", error)
-	// 	panic(error)
-	// }
 	context := &Context{}
 	initConnection(context)
 	initChannels(context, 16)

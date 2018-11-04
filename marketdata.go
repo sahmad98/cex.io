@@ -165,7 +165,7 @@ func PrintOrderbook() {
 		}
 		fmt.Fprintf(ob, "\n")
 		goterm.Println(ob)
-		goterm.Printf("%+v", orderbook.getBuffer())
+		// goterm.Printf("%+v", orderbook.getBuffer())
 	}
 
 	goterm.Flush()
@@ -205,8 +205,8 @@ func (md *MarketDataAdapter) UpdateSnapshot(m *Message) {
 	updated_bid := false
 	updated_ask := false
 	orderbook.Id++
+	// TODO Simplify this
 	for _, update := range m.Data.Bids {
-		l.Infof("Bid Update %+v", update)
 		if update[1] == 0 {
 			orderbook.removeLevel(update[0], kBuy)
 		} else {
@@ -218,7 +218,6 @@ func (md *MarketDataAdapter) UpdateSnapshot(m *Message) {
 	}
 
 	for _, update := range m.Data.Asks {
-		l.Infof("Ask Update %+v", update)
 		if update[1] == 0 {
 			orderbook.removeLevel(update[0], kSell)
 		} else {
@@ -232,22 +231,23 @@ func (md *MarketDataAdapter) UpdateSnapshot(m *Message) {
 
 	sort.Sort(sort.Reverse(&orderbook.Bids))
 	sort.Sort(&orderbook.Asks)
+	l.Infof("MD_UPDTE,PERF,%d,%d", time.Now().UnixNano()-m.Data.Timestamp*time.Millisecond.Nanoseconds(), time.Now().UnixNano()-m.RecvTimestamp)
 	md.OrderbookChannel <- *orderbook
 }
 
-type HandlerFunc func(message Message)
+type HandlerFunc func(message *Message)
 
 type MarketDataAdapter struct {
-	PingChannel      chan Message
-	ResponseChannel  chan Message
-	UpdateChannel    chan Message
+	PingChannel      chan *Message
+	ResponseChannel  chan *Message
+	UpdateChannel    chan *Message
 	OrderbookChannel chan Orderbook
 	Context          *Context
 	UpdateHandler    HandlerFunc
 	ResponseHandler  HandlerFunc
 }
 
-func ResponseHandler(m Message) {
+func ResponseHandler(m *Message) {
 	if m.Type == "auth" {
 		if m.Data.Ok != "ok" {
 			l.Errorf("Auth Error %s", m.Data.Error)
@@ -260,7 +260,7 @@ func ResponseHandler(m Message) {
 func (md *MarketDataAdapter) pingPongRoutine() {
 	for ping := range md.PingChannel {
 		ping.Type = "pong"
-		md.Context.SendChannel <- ping
+		md.Context.SendChannel <- *ping
 		l.Infof("PONG")
 	}
 }
@@ -275,12 +275,9 @@ func (md *MarketDataAdapter) responseRouterRoutine() {
 			l.Infof("PING")
 			md.PingChannel <- message
 		} else if message.Type == "md_update" {
-			l.Infof("MD_UPDTE")
 			md.UpdateChannel <- message
 		} else if message.Type == "ticker" {
-			l.Infof("TICKER")
-			message.Data.Pair = getTickerSymbol(&message)
-			l.Infof("TICKER %s", message.Data.Pair)
+			message.Data.Pair = getTickerSymbol(message)
 			md.UpdateChannel <- message
 		} else {
 			md.ResponseChannel <- message
@@ -292,7 +289,7 @@ func (md *MarketDataAdapter) responseHandlerRoutine() {
 	for response := range md.ResponseChannel {
 		if response.Type == "order-book-subscribe" {
 			l.Infof("MD: %+v", response)
-			md.CreateSnapshot(&response)
+			md.CreateSnapshot(response)
 			l.Infof("%+v", ob_map)
 		}
 		md.ResponseHandler(response)
@@ -301,13 +298,12 @@ func (md *MarketDataAdapter) responseHandlerRoutine() {
 
 func (md *MarketDataAdapter) updateHandlerRoutine() {
 	for response := range md.UpdateChannel {
-		// log.Printf("UpdateChannel: %+v", response)
 		orderbook := ob_map[response.Data.Pair.(string)]
 		if response.Type == "md_update" && orderbook.Id+1 == int32(response.Data.Id) {
-			md.UpdateSnapshot(&response)
+			md.UpdateSnapshot(response)
 			l.Infof("Current Orderbook: %+v", orderbook)
 		} else if response.Type == "ticker" {
-			md.UpdateTicker(&response)
+			md.UpdateTicker(response)
 		} else {
 			log.Fatal("Missed update snapshot/Resync")
 		}
@@ -337,11 +333,11 @@ func (md *MarketDataAdapter) runOrderbookPublisher() {
 func NewMarketDataAdapter(context *Context) *MarketDataAdapter {
 	md := MarketDataAdapter{}
 	md.Context = context
-	md.PingChannel = make(chan Message, 16)
-	md.ResponseChannel = make(chan Message, 16)
-	md.UpdateChannel = make(chan Message, 16)
+	md.PingChannel = make(chan *Message, 16)
+	md.ResponseChannel = make(chan *Message, 16)
+	md.UpdateChannel = make(chan *Message, 16)
 	md.OrderbookChannel = make(chan Orderbook, 16)
-	md.UpdateHandler = func(m Message) {}
+	md.UpdateHandler = func(m *Message) {}
 	md.ResponseHandler = ResponseHandler
 
 	// Start Response handler goroutine which will
