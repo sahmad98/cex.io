@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/buger/goterm"
+	"github.com/golang-collections/go-datastructures/queue"
 	"github.com/google/flatbuffers/go"
 	buffer "github.com/sahmad98/cex.io/types"
 	"github.com/spf13/viper"
@@ -180,7 +181,7 @@ func (md *MarketDataAdapter) CreateSnapshot(m *Message) {
 	orderbook.allLevelUpdate(m.Data.Asks, kSell)
 	ob_map[m.Data.Pair.(string)] = orderbook
 	l.Infof("Created Orderbook %+v", orderbook)
-	md.OrderbookChannel <- *orderbook
+	md.OrderbookChannel.Put(*orderbook)
 }
 
 func ParseFloat32(data string) float32 {
@@ -196,7 +197,7 @@ func (md *MarketDataAdapter) UpdateTicker(m *Message) {
 		orderbook.Volume = ParseFloat32(m.Data.Volume)
 		orderbook.Bid = m.Data.Bid
 		orderbook.Ask = m.Data.Ask
-		md.OrderbookChannel <- *orderbook
+		md.OrderbookChannel.Put(*orderbook)
 	}
 }
 
@@ -232,16 +233,16 @@ func (md *MarketDataAdapter) UpdateSnapshot(m *Message) {
 	sort.Sort(sort.Reverse(&orderbook.Bids))
 	sort.Sort(&orderbook.Asks)
 	l.Infof("MD_UPDTE,PERF,%d,%d", time.Now().UnixNano()-m.Data.Timestamp*time.Millisecond.Nanoseconds(), time.Now().UnixNano()-m.RecvTimestamp)
-	md.OrderbookChannel <- *orderbook
+	md.OrderbookChannel.Put(*orderbook)
 }
 
 type HandlerFunc func(message *Message)
 
 type MarketDataAdapter struct {
-	PingChannel      chan *Message
-	ResponseChannel  chan *Message
-	UpdateChannel    chan *Message
-	OrderbookChannel chan Orderbook
+	PingChannel      *queue.RingBuffer
+	ResponseChannel  *queue.RingBuffer
+	UpdateChannel    *queue.RingBuffer
+	OrderbookChannel *queue.RingBuffer
 	Context          *Context
 	UpdateHandler    HandlerFunc
 	ResponseHandler  HandlerFunc
@@ -258,9 +259,10 @@ func ResponseHandler(m *Message) {
 }
 
 func (md *MarketDataAdapter) pingPongRoutine() {
-	for ping := range md.PingChannel {
-		ping.Type = "pong"
-		md.Context.SendChannel <- *ping
+	for {
+		ping, _ := md.PingChannel.Get()
+		ping.(*Message).Type = "pong"
+		md.Context.SendChannel <- *ping.(*Message)
 		l.Infof("PONG")
 	}
 }
@@ -270,40 +272,43 @@ func getTickerSymbol(message *Message) string {
 }
 
 func (md *MarketDataAdapter) responseRouterRoutine() {
-	for message := range md.Context.RecvChannel {
-		if message.Type == "ping" {
+	for {
+		message, _ := md.Context.RecvChannel.Get()
+		if message.(*Message).Type == "ping" {
 			l.Infof("PING")
-			md.PingChannel <- message
-		} else if message.Type == "md_update" {
-			md.UpdateChannel <- message
-		} else if message.Type == "ticker" {
-			message.Data.Pair = getTickerSymbol(message)
-			md.UpdateChannel <- message
+			md.PingChannel.Put(message)
+		} else if message.(*Message).Type == "md_update" {
+			md.UpdateChannel.Put(message)
+		} else if message.(*Message).Type == "ticker" {
+			message.(*Message).Data.Pair = getTickerSymbol(message.(*Message))
+			md.UpdateChannel.Put(message)
 		} else {
-			md.ResponseChannel <- message
+			md.ResponseChannel.Put(message)
 		}
 	}
 }
 
 func (md *MarketDataAdapter) responseHandlerRoutine() {
-	for response := range md.ResponseChannel {
-		if response.Type == "order-book-subscribe" {
+	for {
+		response, _ := md.ResponseChannel.Get()
+		if response.(*Message).Type == "order-book-subscribe" {
 			l.Infof("MD: %+v", response)
-			md.CreateSnapshot(response)
+			md.CreateSnapshot(response.(*Message))
 			l.Infof("%+v", ob_map)
 		}
-		md.ResponseHandler(response)
+		md.ResponseHandler(response.(*Message))
 	}
 }
 
 func (md *MarketDataAdapter) updateHandlerRoutine() {
-	for response := range md.UpdateChannel {
-		orderbook := ob_map[response.Data.Pair.(string)]
-		if response.Type == "md_update" && orderbook.Id+1 == int32(response.Data.Id) {
-			md.UpdateSnapshot(response)
+	for {
+		response, _ := md.UpdateChannel.Get()
+		orderbook := ob_map[response.(*Message).Data.Pair.(string)]
+		if response.(*Message).Type == "md_update" && orderbook.Id+1 == int32(response.(*Message).Data.Id) {
+			md.UpdateSnapshot(response.(*Message))
 			l.Infof("Current Orderbook: %+v", orderbook)
-		} else if response.Type == "ticker" {
-			md.UpdateTicker(response)
+		} else if response.(*Message).Type == "ticker" {
+			md.UpdateTicker(response.(*Message))
 		} else {
 			log.Fatal("Missed update snapshot/Resync")
 		}
@@ -320,8 +325,9 @@ func (md *MarketDataAdapter) runOrderbookPublisher() {
 			log.Fatal("Error opening publish connection ", error)
 		}
 		dest, error := net.ResolveUDPAddr("udp", ip+":"+strconv.Itoa(port))
-		for orderbook := range md.OrderbookChannel {
-			_, err := conn.WriteTo(orderbook.getBuffer(), dest)
+		for {
+			orderbook, _ := md.OrderbookChannel.Get()
+			_, err := conn.WriteTo(orderbook.(*Orderbook).getBuffer(), dest)
 			l.Infof("Relay Orderbook: %+v", orderbook)
 			if err != nil {
 				l.Infof("Error Relaying, %s", err)
@@ -333,10 +339,10 @@ func (md *MarketDataAdapter) runOrderbookPublisher() {
 func NewMarketDataAdapter(context *Context) *MarketDataAdapter {
 	md := MarketDataAdapter{}
 	md.Context = context
-	md.PingChannel = make(chan *Message, 16)
-	md.ResponseChannel = make(chan *Message, 16)
-	md.UpdateChannel = make(chan *Message, 16)
-	md.OrderbookChannel = make(chan Orderbook, 16)
+	md.PingChannel = queue.NewRingBuffer(16)
+	md.ResponseChannel = queue.NewRingBuffer(16)
+	md.UpdateChannel = queue.NewRingBuffer(16)
+	md.OrderbookChannel = queue.NewRingBuffer(64)
 	md.UpdateHandler = func(m *Message) {}
 	md.ResponseHandler = ResponseHandler
 
@@ -385,8 +391,8 @@ func (adapter *MarketDataAdapter) Unsubscribe(sym1, sym2 string) {
 
 func (adapter *MarketDataAdapter) Cleanup() {
 	adapter.Context.Cleanup()
-	close(adapter.PingChannel)
-	close(adapter.ResponseChannel)
-	close(adapter.UpdateChannel)
+	adapter.PingChannel.Dispose()
+	adapter.ResponseChannel.Dispose()
+	adapter.UpdateChannel.Dispose()
 	l.Infof("MarketDataAdapater Cleaup")
 }
