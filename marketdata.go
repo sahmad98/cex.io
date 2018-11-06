@@ -376,6 +376,13 @@ func (adapter *MarketDataAdapter) Subscribe(sym1, sym2 string, depth int) {
 	// log.Printf("Subscribed:", sym1, sym2, depth)
 }
 
+func (adapter *MarketDataAdapter) Unsubscribe(sym1, sym2 string) {
+	request := Message{}
+	request.Type = "order-book-unsubscribe"
+	request.Data.Pair = []string{sym1, sym2}
+	adapter.Context.SendChannel <- request
+}
+
 func (adapter *MarketDataAdapter) Cleanup() {
 	adapter.Context.Cleanup()
 	close(adapter.PingChannel)
