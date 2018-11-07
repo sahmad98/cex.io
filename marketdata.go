@@ -189,15 +189,14 @@ func ParseFloat32(data string) float32 {
 	return float32(num)
 }
 
-func (md *MarketDataAdapter) UpdateTicker(m *Message) {
-	if orderbook, ok := ob_map[m.Data.Pair.(string)]; ok {
+func (md *MarketDataAdapter) UpdateTicker(m *Message, orderbook *Orderbook) {
+	if orderbook != nil {
 		orderbook.Low = ParseFloat32(m.Data.Low)
 		orderbook.High = ParseFloat32(m.Data.High)
 		orderbook.LastPrice = ParseFloat32(m.Data.Last)
 		orderbook.Volume = ParseFloat32(m.Data.Volume)
 		orderbook.Bid = m.Data.Bid
 		orderbook.Ask = m.Data.Ask
-		md.OrderbookChannel.Put(*orderbook)
 	}
 }
 
@@ -308,7 +307,8 @@ func (md *MarketDataAdapter) updateHandlerRoutine() {
 			md.UpdateSnapshot(response.(*Message))
 			l.Infof("Current Orderbook: %+v", orderbook)
 		} else if response.(*Message).Type == "ticker" {
-			md.UpdateTicker(response.(*Message))
+			md.UpdateTicker(response.(*Message), orderbook)
+			md.OrderbookChannel.Put(*orderbook)
 		} else {
 			log.Fatal("Missed update snapshot/Resync")
 		}
