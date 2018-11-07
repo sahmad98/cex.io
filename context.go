@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/golang-collections/go-datastructures/queue"
 	"github.com/google/logger"
 	"github.com/gorilla/websocket"
 	"github.com/spf13/viper"
@@ -57,7 +58,7 @@ type Message struct {
 
 type Context struct {
 	Connection      *websocket.Conn
-	RecvChannel     chan *Message
+	RecvChannel     *queue.RingBuffer
 	SendChannel     chan Message
 	SendJsonChannel chan []byte
 	Logger          *logger.Logger
@@ -95,7 +96,7 @@ func initLogger() {
 }
 
 func initChannels(context *Context, q_size int) {
-	context.RecvChannel = make(chan *Message, q_size)
+	context.RecvChannel = queue.NewRingBuffer(16)
 	context.SendChannel = make(chan Message, q_size)
 	context.SendJsonChannel = make(chan []byte, q_size)
 }
@@ -122,7 +123,7 @@ func runWebsocketReader(context *Context) {
 		if error != nil {
 			l.Errorf("Unable to parse response: %s", error)
 		} else {
-			context.RecvChannel <- &response
+			context.RecvChannel.Put(&response)
 		}
 	}
 }
@@ -183,7 +184,7 @@ func (context *Context) Authenticate() error {
 
 func (context *Context) Cleanup() {
 	context.Connection.Close()
-	close(context.RecvChannel)
+	context.RecvChannel.Dispose()
 	close(context.SendChannel)
 	l.Infof("Context Cleanup")
 	l.Close()
