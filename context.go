@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/golang-collections/go-datastructures/queue"
 	"github.com/google/logger"
 	"github.com/gorilla/websocket"
 	"github.com/spf13/viper"
@@ -25,43 +24,15 @@ var LOG_PATH = "."
 var LOG_FILE = "marketdata.log"
 var l *logger.Logger = nil
 
-// Request/Response structure used to parse outgoing/incoming json
-// string into a golang structure.
-type Message struct {
-	Type string `json:"e"` // Field to specify the type of message
-	Auth struct {
-		Key       string `json:"key"`
-		Signature string `json:"signature"`
-		Timestamp int64  `json:"timestamp"`
-	} `json:"auth"`
-	Data struct {
-		Id        int         `json:"id"`
-		Pair      interface{} `json:"pair"`
-		Subscribe bool        `json:"subscribe"`
-		Depth     int         `json:"depth"`
-		Bids      [][]float32 `json:"bids"`
-		Asks      [][]float32 `json:"asks"`
-		Low       string      `json:"low"`
-		High      string      `json:"high"`
-		Last      string      `json:"last"`
-		Volume    string      `json:"volume"`
-		Volume30  string      `json:"volume30d"`
-		Bid       float32     `json:"bid"`
-		Ask       float32     `json:"ask"`
-		Ok        string      `json:"ok"`
-		Error     string      `json:"error"`
-		Timestamp int64       `json:"time"`
-	} `json:"data"`
-	// Custom data for performace calculations
-	RecvTimestamp int64
-}
-
 type Context struct {
-	Connection      *websocket.Conn
-	RecvChannel     *queue.RingBuffer
-	SendChannel     chan Message
-	SendJsonChannel chan []byte
-	Logger          *logger.Logger
+	Connection        *websocket.Conn
+	RecvChannel       *Buffer
+	ResponseChannel   *Buffer
+	SendChannel       chan Message
+	SendJsonChannel   chan []byte
+	Logger            *logger.Logger
+	marketDataAdapter *MarketDataAdapter
+	orderManager      *OrderManager
 }
 
 func readConfig() {
@@ -95,8 +66,9 @@ func initLogger() {
 	l = logger.Init("", false, false, file_handle)
 }
 
-func initChannels(context *Context, q_size int) {
-	context.RecvChannel = queue.NewRingBuffer(16)
+func (context *Context)init(q_size int) {
+	context.RecvChannel = NewMessageBuffer(q_size)
+	context.ResponseChannel = NewMessageBuffer(q_size)
 	context.SendChannel = make(chan Message, q_size)
 	context.SendJsonChannel = make(chan []byte, q_size)
 }
@@ -110,7 +82,7 @@ func initConnection(context *Context) {
 	context.Connection = connection
 }
 
-func runWebsocketReader(context *Context) {
+func (context *Context) runWebsocketReader() {
 	for {
 		_, message, error := context.Connection.ReadMessage()
 		l.Infof("RECV: %s", message)
@@ -124,11 +96,12 @@ func runWebsocketReader(context *Context) {
 			l.Errorf("Unable to parse response: %s", error)
 		} else {
 			context.RecvChannel.Put(&response)
+			l.Infof("PutRecvChannel: ", response)
 		}
 	}
 }
 
-func runWebsocketSender(context *Context) {
+func (context *Context) runWebsocketSender() {
 	for request := range context.SendChannel {
 		json_string, error := json.Marshal(request)
 		if error != nil {
@@ -138,7 +111,7 @@ func runWebsocketSender(context *Context) {
 	}
 }
 
-func runWebsocketJsonSender(context *Context) {
+func (context *Context) runWebsocketJsonSender() {
 	for request := range context.SendJsonChannel {
 		l.Infof("SEND: %s", request)
 		error := context.Connection.WriteMessage(websocket.TextMessage, request)
@@ -148,18 +121,61 @@ func runWebsocketJsonSender(context *Context) {
 	}
 }
 
+func (context *Context) runResponseRouter() {
+	for {
+		response := context.RecvChannel.Get()
+		var res_type string = response.Type
+		if res_type == "ticker" || res_type == "order-book-subscribe" || res_type == "order-book-unsubscribe" || res_type == "md_update" {
+			context.marketDataAdapter.ResponseChannel.Put(&response)
+			l.Infof("MDResponseChannelPut: ", response)
+		} else if res_type == "place-order" || res_type == "cancel-replace-order" || res_type == "get-order" || res_type == "cancel-order" || res_type == "close-position" {
+			context.orderManager.ResponseChannel.Put(&response)
+			l.Infof("OMResponseChannelPut: ", response)
+		} else {
+			context.ResponseChannel.Put(&response)
+			l.Infof("ContextResponseChannelPut: ", response)
+		}
+	}
+}
+
+func (context *Context) SendPongMessage(m *Message) {
+	for {
+		m.Type = "pong"
+		context.SendChannel <- *m
+		l.Infof("PONG")
+	}
+}
+
+func (context *Context) runResponseHandler() {
+	for {
+		response := context.ResponseChannel.Get()
+		var res_type string = response.Type
+		if res_type == "ping" {
+			context.SendPongMessage(&response)
+		} else if res_type == "auth" {
+			if response.Data.Ok == "ok" {
+				l.Infof("Authenticated Successfully")
+			} else {
+				l.Infof("Authentication Error: ", response.Data.Ok)
+			}
+		}
+	}
+}
+
 func runGoRoutines(context *Context) {
-	go runWebsocketJsonSender(context)
-	go runWebsocketSender(context)
-	go runWebsocketReader(context)
+	go context.runWebsocketJsonSender()
+	go context.runWebsocketSender()
+	go context.runWebsocketReader()
+	go context.runResponseRouter()
+	go context.runResponseHandler()
 }
 
 func GetApplicationContext() *Context {
-	initLogger()
 	readConfig()
+	initLogger()
 	context := &Context{}
 	initConnection(context)
-	initChannels(context, 16)
+	context.init(16)
 	runGoRoutines(context)
 	return context
 }
@@ -184,7 +200,6 @@ func (context *Context) Authenticate() error {
 
 func (context *Context) Cleanup() {
 	context.Connection.Close()
-	context.RecvChannel.Dispose()
 	close(context.SendChannel)
 	l.Infof("Context Cleanup")
 	l.Close()
